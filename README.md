@@ -28,7 +28,11 @@ scipy
 
 ### Interactive Mode (Default)
 ```bash
-python normative_model_LEP.py
+python normative_model_LEP_EN.py
+```
+or for Chinese version
+```bash
+python normative_model_LEP_CN.py
 ```
 Select from:
 - Prediction mode: Get normative predictions with confidence intervals
