@@ -1,14 +1,16 @@
-# Normative_Model_of_Laser_Evoked_EEG_Feature
+# Normative Model of Laser-Evoked EEG Features
 
 A command-line tool for predicting laser-evoked brain responses (LEP features) using normative models trained with PCNtoolkit.
 
 ## Overview
 
-This tool predicts seven brain electrical features from laser-evoked potentials based on covariates (laser power, gender, age, height):
-- **ERP components**: N1, N2, P2 amplitudes and latencies
-- **Time-frequency features**: ERP, alpha, beta, gamma magnitudes
+This tool predicts ten brain electrical features from laser-evoked potentials based on covariates (laser power, sex, age, height):
 
-Each feature uses an independent normative model with B-spline basis functions and can calculate Z-scores for observed values.
+- **ERP amplitudes**: N1, N2, P2 (μV)
+- **ERP latencies**: N1, N2, P2 (ms)
+- **Time-frequency features**: LEP, alpha, beta, gamma magnitudes (μV^2/Hz)
+
+Each feature uses an independent hierarchical Bayesian regression (HBR) normative model with B-spline basis functions. The tool can generate normative predictions with confidence intervals and calculate Z-scores for observed values.
 
 ## Requirements
 
@@ -27,54 +29,80 @@ scipy
 ## Usage
 
 ### Interactive Mode (Default)
+
 ```bash
 python normative_model_LEP_EN.py
 ```
-```
+
 Select from:
-- Prediction mode: Get normative predictions with confidence intervals
-- Z-score mode: Calculate deviations from normative values
+- **Prediction mode**: Get normative predictions with confidence intervals
+- **Z-score mode**: Calculate deviations from normative values
 
 ### Quick Prediction
-```bash
-python predictor_by_feature.py -q 3.5 1 21 170
-```
-Arguments: laser_power gender age height
 
-### Batch Processing
 ```bash
-python predictor_by_feature.py -b input.csv -o output.csv
+python normative_model_LEP_EN.py -q 3.5 1 21 170
+```
+
+Arguments: `laserpower gender age height`
+
+### CSV Batch Prediction (Recommended)
+
+```bash
+python normative_model_LEP_EN.py -c input.csv -o output.csv
+```
+
+**Input CSV format**: Only `laserpower` is required. Columns `gender`, `age`, `height` are optional.
+
+**Missing value handling**:
+- `age` or `height` = NaN → imputed with training set mean
+- `gender` = NaN → population-weighted average of male and female predictions
+- Column entirely absent → treated as all NaN
+
+**Output**: Predictions include mean, std, 95% CI, imputation flags, and Z-scores if observation columns are provided.
+
+### Legacy Batch Processing
+
+```bash
+python normative_model_LEP_EN.py -b input.csv -o output.csv
 ```
 
 **Input CSV format**: Must contain columns `laserpower`, `gender`, `age`, `height`. Optional feature columns for Z-score calculation.
 
-**Output**: Predictions include mean, std, 95% CI (lower/upper bounds), and Z-scores if observations provided.
+### Debug Mode
+
+```bash
+python normative_model_LEP_EN.py -d -q 3.5 1 65 170
+```
+
+Shows intermediate values including standardization parameters and B-spline basis outputs.
 
 ## Input Parameters
 
-| Parameter | Range | Recommended | Description |
-|-----------|-------|-------------|-------------|
-| laserpower | 1.0-4.5 | 2.5-4.0 | Laser stimulation power |
-| gender | 1 or 2 | - | 1=male, 2=female |
-| age | 16-50 | 18-25 | Years |
-| height | 150-190 | - | cm |
+| Parameter  | Range     | Recommended | Description              |
+|------------|-----------|-------------|--------------------------|
+| laserpower | 1.0–4.5   | 2.5–4.0     | Laser stimulation power  |
+| gender     | 1 or 2   | –           | 1 = male, 2 = female     |
+| age        | 16–86    | 18–50       | Years                    |
+| height     | 150–196  | –           | cm                       |
 
 ## Output
 
 For each feature, predictions include:
+
 - **mean**: Predicted normative value
 - **std**: Uncertainty (heteroscedastic variance)
-- **lower_95/upper_95**: 95% confidence interval
-- **z_score**: (observed - mean) / std (when observations provided)
+- **lower_95 / upper_95**: 95% confidence interval
+- **z_score**: (observed − mean) / std (when observations provided)
 
 ## Citation
 
 If you use this tool in published research, please cite:
 
-Zhuang Y., Zhang L.B., Wang X.Q., Geng X.Y., & Hu L., (in preparation) From Normative Features to Multidimensional Estimation of Pain: A Large-Scale Study of Laser-Evoked Brain Responses.
+> Zhuang Y., Zhang L.B., Wang X.Q., Geng X.Y., & Hu L. (in preparation). From Normative Features to Multidimensional Estimation of Pain: A Large-Scale Study of Laser-Evoked Brain Responses.
 
 ## Author
 
-Yun Zhuang  
-Version: 1.0  
+Yun Zhuang
+Version: 4.0
 Date: 2026-02-16
