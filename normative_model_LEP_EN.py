@@ -647,7 +647,7 @@ def print_results(results, laserpower, gender, age, height):
     # Print magnitudes
     if magnitude_features:
         print("\n" + "-"*70)
-        print("Magnitudes (a.u.):")
+        print("Magnitudes (μV^2/Hz):")
         print("-"*70)
         for feature in magnitude_features:
             pred = results[feature]
@@ -1133,7 +1133,7 @@ def csv_batch_mode(predictor, input_file, output_file):
             print(f"\nPrediction summary (mean values):")
             for col in pred_cols:
                 feature = col.replace('_pred_mean', '')
-                unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "a.u."
+                unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "μV^2/Hz"
                 vals = results_df[col].dropna()
                 print(f"  {feature:15s}: mean={vals.mean():.2f}, "
                       f"range=[{vals.min():.2f}, {vals.max():.2f}] {unit}")
@@ -1212,7 +1212,7 @@ Covariate Instructions:
 Features (10 total):
   • Amplitudes: N1_amp, N2_amp, P2_amp (μV)
   • Latencies: N1_latency, N2_latency, P2_latency (ms)
-  • Magnitudes: LEP_mag, alpha_mag, beta_mag, gamma_mag (a.u.)
+  • Magnitudes: LEP_mag, alpha_mag, beta_mag, gamma_mag (μV^2/Hz)
         """
     )
     
@@ -1241,7 +1241,7 @@ Features (10 total):
         print(f"\n✓ Using parameter file: {predictor.params_file}")
         print(f"✓ Successfully loaded {len(predictor.feature_names)} feature models:")
         for i, feature in enumerate(predictor.feature_names, 1):
-            unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "a.u."
+            unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "μV^2/Hz"
             print(f"   {i}. {feature} ({unit})")
     except Exception as e:
         print(f"\n❌ Loading failed: {e}")
