@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
 Normative model for laser-evoked brain electrical features based on PCNtoolkit
+
 Author: Yun Zhuang
-Date: 2025-11-27
-Version: v1.0
+Date: 2025-01-16
+Version: v4.0.0
+
 If you use this tool in published research, please cite:
-Zhuang Y., Zhang L.B., Wang X.Q., Geng X.Y., & Hu L., (in preparation) From Normative Features to Multidimensional Estimation of Pain: A Large-Scale Study of Laser-Evoked Brain Responses.
+Zhuang Y., Zhang L.B., Wang X.Q., Geng X.Y., & Hu L., (in preparation) 
+From Normative Features to Multidimensional Estimation of Pain: 
+A Large-Scale Study of Laser-Evoked Brain Responses.
+
 """
 
 import json
@@ -66,12 +71,14 @@ def create_bspline_basis(x, knots, degree=3):
 
 class HBRPredictorByFeature:
     """
-    HBR Predictor - feature-wise training version
+    HBR Predictor - feature-wise training version (10 features)
     
     Features:
     - Each feature has independent training data and standardization parameters
     - Automatically handles different inscalers for different features
     - Unified covariate input interface
+    - Supports 10 EEG features: N1/N2/P2 amplitudes, N1/N2/P2 latencies, 
+      LEP/alpha/beta/gamma magnitudes
     """
     
     def __init__(self, params_file=None, custom_inscaler=None):
@@ -99,9 +106,12 @@ class HBRPredictorByFeature:
         self.params_file = str(params_path)
         self.custom_inscaler = custom_inscaler
         
-        # Feature names (in expected order)
-        feature_order = ['N1_amp', 'N2_amp', 'P2_amp', 
-                        'ERP_mag', 'alpha_mag', 'beta_mag', 'gamma_mag']
+        # Feature names (in expected order) - Updated for 10 features
+        feature_order = [
+            'N1_amp', 'N2_amp', 'P2_amp',              # Amplitudes
+            'N1_latency', 'N2_latency', 'P2_latency',  # Latencies
+            'LEP_mag', 'alpha_mag', 'beta_mag', 'gamma_mag'  # Magnitudes
+        ]
         self.feature_names = [f for f in feature_order if f in self.model_params]
         
         if not self.feature_names:
@@ -110,13 +120,19 @@ class HBRPredictorByFeature:
         # Prepare inscaler for each feature
         self._prepare_inscalers()
         
-        # Covariate ranges (based on training data statistics)
+        # Validate inscaler values are reasonable
+        self._validate_inscalers()
+        
+        # Debug mode flag
+        self.debug = False
+        
+        # Covariate ranges (based on training data statistics from inscaler)
         self.covariate_names = ['laserpower', 'gender', 'age', 'height']
         self.ranges = {
             'laserpower': {'min': 1.0, 'max': 4.5, 'rec_min': 2.5, 'rec_max': 4.0},
             'gender': {'min': 1, 'max': 2},
-            'age': {'min': 16.0, 'max': 50.0, 'rec_min': 18.0, 'rec_max': 25.0},
-            'height': {'min': 150.0, 'max': 190.0}
+            'age': {'min': 16.0, 'max': 86.0, 'rec_min': 18.0, 'rec_max': 50.0},
+            'height': {'min': 150.0, 'max': 196.0}
         }
     
     def _find_params_file(self):
@@ -149,11 +165,13 @@ class HBRPredictorByFeature:
         """
         self.inscalers = {}
         
-        # Global default inscaler (as fallback only, may not be accurate)
+        # Global default inscaler (as fallback only)
+        # These values are from normative_model.json inscalers (training set statistics)
         # Corresponding order: laserpower, gender, age, height
+        # WARNING: These should match the inscaler used during model training!
         default_inscaler = {
-            'mean': np.array([3.3427, 1.6024, 24.5392, 167.5705]),
-            'std': np.array([0.6794, 0.4894, 3.4240, 7.1038])
+            'mean': np.array([3.2838, 1.5513, 27.3447, 169.9180]),
+            'std': np.array([0.6542, 0.4974, 12.2390, 8.5932])
         }
         
         # Check custom_inscaler type
@@ -215,458 +233,531 @@ class HBRPredictorByFeature:
                     print(f"  ✓ {feature}: Using inscaler from model parameters")
                     has_any_inscaler = True
                 else:
-                    # Use global default inscaler
+                    # Use default inscaler
                     self.inscalers[feature] = default_inscaler
-                    print(f"  ⚠️  {feature}: No inscaler in model parameters, using default values")
+                    print(f"  ⚠️  {feature}: No inscaler in parameters, using default")
             
             if not has_any_inscaler:
-                print("\n⚠️  Warning: All features lack inscaler, using default values")
-                print("   Suggestion: Run compute_inscalers_matlab.m to calculate accurate inscaler")
-        
-        print()
+                print(f"  ⚠️  Warning: No inscalers found in model parameters, using global default")
     
-    def check_input(self, laserpower, gender, age, height):
+    def _validate_inscalers(self):
+        """Validate inscaler values are reasonable"""
+        # Expected approximate ranges based on normative_model.json
+        expected_ranges = {
+            0: ('laserpower_std', 0.3, 1.5),   # std for laserpower
+            1: ('gender_std', 0.3, 0.6),        # std for gender
+            2: ('age_std', 5.0, 30.0),           # std for age - MUST be large (>5)
+            3: ('height_std', 4.0, 15.0),        # std for height
+        }
+        
+        for feature in self.feature_names:
+            ins = self.inscalers[feature]
+            for idx, (name, low, high) in expected_ranges.items():
+                std_val = ins['std'][idx]
+                if std_val < low or std_val > high:
+                    print(f"  ⚠️  WARNING [{feature}]: {name}={std_val:.4f} "
+                          f"outside expected range [{low}, {high}]")
+                    if idx == 2 and std_val < 5.0:
+                        print(f"     ❌ age_std is suspiciously small! "
+                              f"This will cause severe prediction bias for older/younger subjects.")
+                        print(f"     Expected ~12.24 (from normative_model.json), got {std_val:.4f}")
+    
+    def check_input(self, laserpower, gender, age, height, show_warnings=True):
         """
-        Check input validity
+        Check input validity and return warnings
         
         Returns:
-            warnings: List of warning messages
-            severity: Severity level ('none', 'low', 'medium', 'high')
+            (warnings_list, severity)
+            severity: 'none', 'info', 'warning', 'error'
         """
         warnings_list = []
         severity = 'none'
         
         # Check laser power
-        if not (self.ranges['laserpower']['min'] <= laserpower <= self.ranges['laserpower']['max']):
-            warnings_list.append(f"⚠️  Laser power {laserpower} out of range [{self.ranges['laserpower']['min']}, {self.ranges['laserpower']['max']}]")
-            severity = 'high'
-        elif not (self.ranges['laserpower']['rec_min'] <= laserpower <= self.ranges['laserpower']['rec_max']):
-            warnings_list.append(f"ℹ️  Laser power {laserpower} is within valid range, but recommended range is [{self.ranges['laserpower']['rec_min']}, {self.ranges['laserpower']['rec_max']}]")
+        if laserpower < self.ranges['laserpower']['min'] or \
+           laserpower > self.ranges['laserpower']['max']:
+            warnings_list.append(
+                f"⚠️  Laser power {laserpower} outside valid range "
+                f"({self.ranges['laserpower']['min']}-{self.ranges['laserpower']['max']})"
+            )
+            severity = 'error'
+        elif laserpower < self.ranges['laserpower']['rec_min'] or \
+             laserpower > self.ranges['laserpower']['rec_max']:
+            warnings_list.append(
+                f"ℹ️  Laser power {laserpower} outside recommended range "
+                f"({self.ranges['laserpower']['rec_min']}-{self.ranges['laserpower']['rec_max']})"
+            )
             if severity == 'none':
-                severity = 'low'
+                severity = 'info'
         
         # Check gender
         if gender not in [1, 2]:
-            warnings_list.append(f"⚠️  Gender value {gender} invalid (should be 1=male or 2=female)")
-            severity = 'high'
+            warnings_list.append(f"⚠️  Gender must be 1 (male) or 2 (female), got {gender}")
+            severity = 'error'
         
         # Check age
-        if not (self.ranges['age']['min'] <= age <= self.ranges['age']['max']):
-            warnings_list.append(f"⚠️  Age {age} out of training range [{self.ranges['age']['min']}, {self.ranges['age']['max']}]")
-            severity = 'high'
-        elif not (self.ranges['age']['rec_min'] <= age <= self.ranges['age']['rec_max']):
-            warnings_list.append(f"⚠️  Age {age} out of recommended range [{self.ranges['age']['rec_min']}, {self.ranges['age']['rec_max']}]")
-            warnings_list.append(f"   Training data mainly concentrated around age 21, with fewer samples above 25")
-            if severity == 'none':
-                severity = 'medium'
+        if age < self.ranges['age']['min'] or age > self.ranges['age']['max']:
+            warnings_list.append(
+                f"⚠️  Age {age} outside valid range "
+                f"({self.ranges['age']['min']}-{self.ranges['age']['max']})"
+            )
+            severity = 'error'
+        elif age < self.ranges['age']['rec_min'] or age > self.ranges['age']['rec_max']:
+            warnings_list.append(
+                f"ℹ️  Age {age} outside recommended range "
+                f"({self.ranges['age']['rec_min']}-{self.ranges['age']['rec_max']}), "
+                "prediction may be less accurate"
+            )
+            if severity not in ['error']:
+                severity = 'warning'
         
         # Check height
-        if not (self.ranges['height']['min'] <= height <= self.ranges['height']['max']):
-            warnings_list.append(f"⚠️  Height {height}cm out of range [{self.ranges['height']['min']}, {self.ranges['height']['max']}]")
-            if severity == 'none':
-                severity = 'low'
+        if height < self.ranges['height']['min'] or height > self.ranges['height']['max']:
+            warnings_list.append(
+                f"⚠️  Height {height} outside valid range "
+                f"({self.ranges['height']['min']}-{self.ranges['height']['max']})"
+            )
+            severity = 'error'
+        
+        if show_warnings and warnings_list:
+            print("\nInput validation warnings:")
+            for warning in warnings_list:
+                print(f"  {warning}")
         
         return warnings_list, severity
     
-    def standardize_input(self, X, feature_name):
-        """
-        Standardize input (using feature-specific inscaler)
-        
-        Parameters:
-            X: Raw input [laserpower, gender, age, height]
-            feature_name: Feature name
-        
-        Returns:
-            X_std: Standardized input
-        """
-        X = np.atleast_1d(X)
-        inscaler = self.inscalers[feature_name]
-        
-        return (X - inscaler['mean']) / inscaler['std']
-    
-    def _expand_covariates(self, X_std, params):
-        """
-        Expand covariates (apply B-spline transformation)
-        
-        Parameters:
-            X_std: Standardized covariates [laserpower_std, gender_std, age_std, height_std]
-            params: Feature model parameters
-        
-        Returns:
-            X_expanded: Expanded covariates (including intercept term)
-            
-        Note:
-            - Dimensions of slope_mu/slope_sigma are (n_expanded_covariates,)
-            - n_expanded_covariates = 1(intercept) + n_bspline_bases + n_other_covariates
-            - Example: 1 + 7(B-spline bases for laserpower) + 3(gender, age, height) = 11
-        """
-        mu_basis_config = params.get('mu_basis', {})
-        basis_column = mu_basis_config.get('basis_column', [])
-        
-        # Check if B-spline is applied to first covariate (laserpower)
-        if 0 in basis_column:
-            laserpower_std = X_std[0]
-            
-            # Get B-spline knots
-            knots_dict = mu_basis_config.get('knots', {})
-            if '0' in knots_dict:
-                knots = np.array(knots_dict['0'])
-            else:
-                # If no predefined knots, generate default knots
-                nknots = mu_basis_config.get('nknots', 5)
-                degree = mu_basis_config.get('degree', 3)
-                interior_knots = np.linspace(-2, 2, nknots)
-                knots = np.concatenate([
-                    np.repeat(interior_knots[0], degree),
-                    interior_knots,
-                    np.repeat(interior_knots[-1], degree)
-                ])
-            
-            # Create B-spline basis functions
-            degree = mu_basis_config.get('degree', 3)
-            bspline_bases = create_bspline_basis(laserpower_std, knots, degree)
-            
-            # Expand: [1(intercept), B-spline_bases(7), gender, age, height]
-            X_expanded = np.concatenate([
-                [1.0],  # Intercept term
-                bspline_bases,  # B-spline basis function values
-                X_std[1:]  # Other covariates (gender, age, height)
-            ])
-        else:
-            # Not using B-spline, directly add intercept
-            X_expanded = np.concatenate([[1.0], X_std])
-        
-        return X_expanded
-    
-    def predict_feature(self, feature_name, X_raw):
+    def predict_single_feature(self, feature_name, laserpower, gender, age, height):
         """
         Predict a single feature
         
-        Parameters:
-            feature_name: Feature name
-            X_raw: Raw covariates [laserpower, gender, age, height]
-        
         Returns:
-            Result dictionary containing mean, std, lower_95, upper_95, z_score
+            dict with keys: 'mean', 'std', 'lower_95', 'upper_95'
         """
+        if feature_name not in self.model_params:
+            raise ValueError(f"Feature {feature_name} not found in model parameters")
+        
         params = self.model_params[feature_name]
         
-        # 1. Standardize input (using this feature's inscaler)
-        X_std = self.standardize_input(X_raw, feature_name)
+        # 1. Prepare input covariates
+        X_raw = np.array([laserpower, gender, age, height])
         
-        # 2. Expand covariates (apply B-spline)
-        X_expanded = self._expand_covariates(X_std, params)
+        # 2. Standardize input
+        inscaler = self.inscalers[feature_name]
+        X_std = (X_raw - inscaler['mean']) / inscaler['std']
         
-        # 3. Get parameters from posterior
-        posterior = params['posterior']
+        if self.debug:
+            print(f"\n  [DEBUG {feature_name}]")
+            print(f"    X_raw:  {X_raw}")
+            print(f"    inscaler mean: {inscaler['mean']}")
+            print(f"    inscaler std:  {inscaler['std']}")
+            print(f"    X_std:  {X_std}")
         
-        # Get slope_mu (fixed effect coefficients)
-        slope_mu = np.array(posterior['slope_mu']['mean'])
+        # 3. Create B-spline basis for mu
+        mu_basis_config = params['mu_basis']
+        basis_col = mu_basis_config['basis_column'][0]
         
-        # Get hierarchical intercept for mu
-        mu_intercept_mu = posterior.get('mu_intercept_mu', {}).get('mean', 0.0)
+        # Get knots and create basis
+        knots_dict = mu_basis_config['knots']
+        knots = knots_dict[str(basis_col)] if isinstance(knots_dict, dict) else knots_dict
         
-        # 4. Predict mu (expected value)
-        # mu = X_expanded @ slope_mu + mu_intercept_mu
-        mu_pred_std = np.dot(X_expanded, slope_mu) + mu_intercept_mu
+        mu_basis = create_bspline_basis(
+            X_std[basis_col], 
+            knots, 
+            degree=mu_basis_config['degree']
+        )
         
-        # 5. Predict sigma (standard deviation)
-        slope_sigma = np.array(posterior['slope_sigma']['mean'])
-        intercept_sigma = posterior['intercept_sigma']['mean']
+        # 4. Construct expanded covariate vector
+        n_basis = len(mu_basis)
+        X_expanded = []
         
-        # Linear prediction for sigma
-        sigma_pred_linear = np.dot(X_expanded, slope_sigma) + intercept_sigma
+        for i, x_val in enumerate(X_std):
+            if i == basis_col:
+                X_expanded.extend(mu_basis)
+            else:
+                X_expanded.append(x_val)
+        
+        X_expanded = np.array(X_expanded)
+        
+        # 5. Check if we need to add dataset batch effect placeholder
+        # New models with dataset batch effect need an extra dimension
+        expected_dim = len(params['covariate_dims'])
+        current_dim = len(X_expanded)
+        
+        if current_dim < expected_dim:
+            # Add placeholder for dataset batch effect (use 0 as default)
+            n_missing = expected_dim - current_dim
+            X_expanded = np.append(X_expanded, [0] * n_missing)
+        
+        # 5. Calculate mu (predicted mean)
+        slope_mu = np.array(params['posterior']['slope_mu']['mean'])
+        intercept_mu = float(params['posterior']['mu_intercept_mu']['mean'])
+        
+        mu_std = np.dot(X_expanded, slope_mu) + intercept_mu
+        
+        if self.debug:
+            print(f"    X_expanded dim: {len(X_expanded)} (expected: {expected_dim})")
+            print(f"    mu_std (standardized): {mu_std:.4f}")
+        
+        # 6. Create B-spline basis for sigma
+        sigma_basis_config = params['sigma_basis']
+        sigma_basis_col = sigma_basis_config['basis_column'][0]
+        
+        sigma_knots_dict = sigma_basis_config['knots']
+        sigma_knots = sigma_knots_dict[str(sigma_basis_col)] if isinstance(sigma_knots_dict, dict) else sigma_knots_dict
+        
+        sigma_basis = create_bspline_basis(
+            X_std[sigma_basis_col],
+            sigma_knots,
+            degree=sigma_basis_config['degree']
+        )
+        
+        # 7. Construct expanded covariate vector for sigma
+        n_sigma_basis = len(sigma_basis)
+        X_sigma_expanded = []
+        
+        for i, x_val in enumerate(X_std):
+            if i == sigma_basis_col:
+                X_sigma_expanded.extend(sigma_basis)
+            else:
+                X_sigma_expanded.append(x_val)
+        
+        X_sigma_expanded = np.array(X_sigma_expanded)
+        
+        # Check if we need to add dataset batch effect placeholder for sigma
+        if len(X_sigma_expanded) < expected_dim:
+            n_missing = expected_dim - len(X_sigma_expanded)
+            X_sigma_expanded = np.append(X_sigma_expanded, [0] * n_missing)
+        
+        # 8. Calculate sigma (predicted std)
+        slope_sigma = np.array(params['posterior']['slope_sigma']['mean'])
+        intercept_sigma = float(params['posterior']['intercept_sigma']['mean'])
+        
+        sigma_linear = np.dot(X_sigma_expanded, slope_sigma) + intercept_sigma
         
         # Apply softplus mapping
         sigma_mapping_params = params['sigma_mapping']['params']
-        sigma_pred_std = softplus(sigma_pred_linear, sigma_mapping_params)
+        sigma_std = softplus(sigma_linear, sigma_mapping_params)
         
-        # 6. Inverse standardization to original scale
+        # 9. Inverse standardize
         outscaler = params['outscaler']
-        mu_pred = mu_pred_std * outscaler['std'] + outscaler['mean']
-        sigma_pred = sigma_pred_std * outscaler['std']
+        mu_original = mu_std * outscaler['std'] + outscaler['mean']
+        sigma_original = sigma_std * outscaler['std']
         
-        # 7. Calculate confidence interval and Z-score
-        lower_95 = mu_pred - 1.96 * sigma_pred
-        upper_95 = mu_pred + 1.96 * sigma_pred
+        if self.debug:
+            print(f"    sigma_std (after softplus): {sigma_std:.4f}")
+            print(f"    outscaler: mean={outscaler['mean']:.4f}, std={outscaler['std']:.4f}")
+            print(f"    mu_original: {mu_original:.4f}")
+            print(f"    sigma_original: {sigma_original:.4f}")
         
-        # Note: Z-score requires observed value, here we return predicted distribution parameters
-        # Actual Z-score calculation: z = (observed - mu_pred) / sigma_pred
+        # 10. Calculate 95% confidence interval
+        lower_95 = mu_original - 1.96 * sigma_original
+        upper_95 = mu_original + 1.96 * sigma_original
         
         return {
-            'mean': float(mu_pred),
-            'std': float(sigma_pred),
+            'mean': float(mu_original),
+            'std': float(sigma_original),
             'lower_95': float(lower_95),
-            'upper_95': float(upper_95),
-            'mu_std': float(mu_pred_std),  # mu in standardized scale (for debugging)
-            'sigma_std': float(sigma_pred_std)  # sigma in standardized scale (for debugging)
+            'upper_95': float(upper_95)
         }
-    
-    def calculate_z_score(self, feature_name, observed_value, predicted_result):
-        """
-        Calculate Z-score for observed value
-        
-        Parameters:
-            feature_name: Feature name
-            observed_value: Observed value
-            predicted_result: Return result from predict_feature
-        
-        Returns:
-            z_score: Z-score
-        """
-        z_score = (observed_value - predicted_result['mean']) / predicted_result['std']
-        return float(z_score)
     
     def predict(self, laserpower, gender, age, height, show_warnings=True):
         """
-        Complete prediction for all features
-        
-        Parameters:
-            laserpower: Laser power
-            gender: Gender (1=male, 2=female)
-            age: Age
-            height: Height (cm)
-            show_warnings: Whether to display input validity warnings
+        Predict all features
         
         Returns:
-            results: Dictionary with feature names as keys and prediction results as values
+            dict: {feature_name: {'mean': ..., 'std': ..., 'lower_95': ..., 'upper_95': ...}}
         """
-        # 1. Check input validity
-        warnings_list, severity = self.check_input(laserpower, gender, age, height)
+        # Check input
+        warnings_list, severity = self.check_input(laserpower, gender, age, height, show_warnings)
         
-        # 2. Display warnings
-        if show_warnings and warnings_list:
-            print("\n" + "="*70)
-            print("⚠️  Input Validity Check")
-            print("="*70)
-            for w in warnings_list:
-                print(w)
-            
-            if severity == 'high':
-                print("\n🔴 Severe Warning: Input significantly out of training range, predictions may be unreliable!")
-            elif severity == 'medium':
-                print("\n🟡 Warning: Input near edge of training range, prediction uncertainty is high")
-            elif severity == 'low':
-                print("\n🟢 Notice: Input slightly deviates from recommended range")
-            
-            print("="*70)
-            
-            if severity == 'high':
-                response = input("\nContinue with prediction? (y/n): ").strip().lower()
-                if response != 'y':
-                    print("❌ Prediction cancelled")
-                    return None
-            print()
+        if severity == 'error':
+            raise ValueError("Input contains errors, cannot proceed with prediction")
         
-        # 3. Prepare input
-        X_raw = np.array([laserpower, gender, age, height])
-        
-        # 4. Predict all features
+        # Predict each feature
         results = {}
         for feature in self.feature_names:
             try:
-                results[feature] = self.predict_feature(feature, X_raw)
+                results[feature] = self.predict_single_feature(
+                    feature, laserpower, gender, age, height
+                )
             except Exception as e:
-                print(f"⚠️  Error predicting feature {feature}: {e}")
-                import traceback
-                traceback.print_exc()
-                results[feature] = {
-                    'mean': np.nan,
-                    'std': np.nan,
-                    'lower_95': np.nan,
-                    'upper_95': np.nan
-                }
+                print(f"  ❌ Error predicting {feature}: {e}")
+                results[feature] = None
         
         return results
     
-    def predict_with_observations(self, laserpower, gender, age, height, observations):
+    def predict_with_observations(self, laserpower, gender, age, height, observations, show_warnings=True):
         """
-        Predict and calculate Z-scores
+        Predict and calculate Z-scores based on observed values
         
         Parameters:
-            laserpower, gender, age, height: Covariates
-            observations: Dictionary with feature names as keys and observed values as values
+            laserpower, gender, age, height: Input covariates
+            observations: dict of observed values, e.g. {'N1_amp': -10.5, 'N2_amp': -18.2}
+            show_warnings: Whether to show input validation warnings
         
         Returns:
-            results: Dictionary containing predictions and Z-scores
+            dict: includes prediction and Z-scores
         """
         # Get predictions
-        predictions = self.predict(laserpower, gender, age, height, show_warnings=False)
-        
-        if predictions is None:
-            return None
+        predictions = self.predict(laserpower, gender, age, height, show_warnings=show_warnings)
         
         # Calculate Z-scores
         for feature, pred in predictions.items():
-            if feature in observations and not np.isnan(observations[feature]):
-                z_score = self.calculate_z_score(feature, observations[feature], pred)
-                pred['observed'] = observations[feature]
+            if pred is not None and feature in observations:
+                observed = observations[feature]
+                z_score = (observed - pred['mean']) / pred['std']
+                pred['observed'] = observed
                 pred['z_score'] = z_score
-            else:
-                pred['observed'] = np.nan
-                pred['z_score'] = np.nan
         
         return predictions
-
-
-def print_results(results, laserpower, gender, age, height, show_debug=False):
-    """
-    Print prediction results
     
-    Parameters:
-        results: Prediction result dictionary
-        laserpower, gender, age, height: Input covariates
-        show_debug: Whether to show debug information (values in standardized scale)
-    """
-    if results is None:
+    def get_feature_info(self):
+        """Get information about all available features"""
+        info = []
+        for feature in self.feature_names:
+            params = self.model_params[feature]
+            info.append({
+                'feature': feature,
+                'model_type': params['model_type'],
+                'outscaler_mean': params['outscaler']['mean'],
+                'outscaler_std': params['outscaler']['std'],
+                'n_covariates': len(params['covariate_names']),
+                'n_batch_effects': len(params.get('batch_effects_names', []))
+            })
+        return pd.DataFrame(info)
+    
+    def get_training_means(self):
+        """
+        Get training set mean values for imputation.
+        Uses inscaler means (which are the training set means before standardization).
+        Returns average across all features' inscalers.
+        """
+        all_means = np.array([self.inscalers[f]['mean'] for f in self.feature_names])
+        avg_mean = np.mean(all_means, axis=0)
+        return {
+            'laserpower': avg_mean[0],
+            'gender': avg_mean[1],  # ~1.55, encodes gender ratio
+            'age': avg_mean[2],
+            'height': avg_mean[3]
+        }
+    
+    def get_gender_ratio(self):
+        """
+        Get female proportion in training set from inscaler gender mean.
+        gender coding: 1=male, 2=female
+        mean = 1*p_male + 2*p_female = 1*(1-p_f) + 2*p_f = 1 + p_f
+        So p_female = mean - 1
+        """
+        training_means = self.get_training_means()
+        p_female = training_means['gender'] - 1.0
+        return {'male': 1.0 - p_female, 'female': p_female}
+    
+    def predict_gender_averaged(self, laserpower, age, height):
+        """
+        Predict using weighted average of male and female predictions.
+        Used when gender is missing (NaN).
+        
+        Weights are proportional to the gender ratio in the training set.
+        For each feature, the averaged prediction is:
+            mu = w_male * mu_male + w_female * mu_female
+            sigma = sqrt(w_male * sigma_male^2 + w_female * sigma_female^2 
+                         + w_male * w_female * (mu_male - mu_female)^2)
+        (This accounts for both within-group variance and between-group mean difference)
+        """
+        ratio = self.get_gender_ratio()
+        w_m, w_f = ratio['male'], ratio['female']
+        
+        results = {}
+        for feature in self.feature_names:
+            try:
+                pred_m = self.predict_single_feature(feature, laserpower, 1, age, height)
+                pred_f = self.predict_single_feature(feature, laserpower, 2, age, height)
+                
+                # Weighted mean
+                mu = w_m * pred_m['mean'] + w_f * pred_f['mean']
+                
+                # Combined variance (law of total variance)
+                var_within = w_m * pred_m['std']**2 + w_f * pred_f['std']**2
+                var_between = w_m * w_f * (pred_m['mean'] - pred_f['mean'])**2
+                sigma = np.sqrt(var_within + var_between)
+                
+                results[feature] = {
+                    'mean': float(mu),
+                    'std': float(sigma),
+                    'lower_95': float(mu - 1.96 * sigma),
+                    'upper_95': float(mu + 1.96 * sigma)
+                }
+            except Exception as e:
+                results[feature] = None
+        
+        return results
+
+
+def print_results(results, laserpower, gender, age, height):
+    """Pretty print prediction results"""
+    if not results:
+        print("No prediction results available")
         return
     
     print("\n" + "="*70)
     print("📊 Prediction Results")
     print("="*70)
-    print(f"\nInput Parameters:")
-    print(f"  Laser power: {laserpower}")
-    print(f"  Gender:      {gender} ({'Male' if gender == 1 else 'Female'})")
-    print(f"  Age:         {age} years")
-    print(f"  Height:      {height} cm")
     
-    print(f"\nPredicted values (mean ± std):")
-    print("-"*70)
+    print("\nInput:")
+    print(f"  Laser Power: {laserpower}")
+    print(f"  Gender: {gender} ({'Male' if gender == 1 else 'Female'})")
+    print(f"  Age: {age} years")
+    print(f"  Height: {height} cm")
     
-    for feature, pred in results.items():
-        mean = pred['mean']
-        std = pred['std']
-        lower = pred['lower_95']
-        upper = pred['upper_95']
-        
-        # Basic information
-        info_str = f"{feature:12s}: {mean:8.2f} ± {std:6.2f}  (95% CI: [{lower:7.2f}, {upper:7.2f}])"
-        
-        # If observed value and Z-score available
-        if 'observed' in pred and not np.isnan(pred['observed']):
-            obs = pred['observed']
-            z = pred['z_score']
-            info_str += f"  | Obs: {obs:7.2f}, Z: {z:6.2f}"
-        
-        print(info_str)
+    # Group features by category
+    amplitude_features = [f for f in results.keys() if '_amp' in f]
+    latency_features = [f for f in results.keys() if '_latency' in f]
+    magnitude_features = [f for f in results.keys() if '_mag' in f]
     
-    if show_debug:
-        print("\nDebug Information (standardized scale):")
+    # Print amplitudes
+    if amplitude_features:
+        print("\n" + "-"*70)
+        print("Amplitudes (μV):")
         print("-"*70)
-        for feature, pred in results.items():
-            if 'mu_std' in pred and 'sigma_std' in pred:
-                print(f"{feature:12s}: μ_std={pred['mu_std']:7.4f}, σ_std={pred['sigma_std']:7.4f}")
+        for feature in amplitude_features:
+            pred = results[feature]
+            if pred:
+                print(f"\n{feature}:")
+                print(f"  Predicted: {pred['mean']:.2f} ± {pred['std']:.2f} μV")
+                print(f"  95% CI: [{pred['lower_95']:.2f}, {pred['upper_95']:.2f}] μV")
+                if 'z_score' in pred:
+                    print(f"  Observed: {pred['observed']:.2f} μV")
+                    print(f"  Z-score: {pred['z_score']:.2f}")
     
-    print("="*70)
+    # Print latencies
+    if latency_features:
+        print("\n" + "-"*70)
+        print("Latencies (ms):")
+        print("-"*70)
+        for feature in latency_features:
+            pred = results[feature]
+            if pred:
+                print(f"\n{feature}:")
+                print(f"  Predicted: {pred['mean']:.2f} ± {pred['std']:.2f} ms")
+                print(f"  95% CI: [{pred['lower_95']:.2f}, {pred['upper_95']:.2f}] ms")
+                if 'z_score' in pred:
+                    print(f"  Observed: {pred['observed']:.2f} ms")
+                    print(f"  Z-score: {pred['z_score']:.2f}")
+    
+    # Print magnitudes
+    if magnitude_features:
+        print("\n" + "-"*70)
+        print("Magnitudes (a.u.):")
+        print("-"*70)
+        for feature in magnitude_features:
+            pred = results[feature]
+            if pred:
+                print(f"\n{feature}:")
+                print(f"  Predicted: {pred['mean']:.2f} ± {pred['std']:.2f}")
+                print(f"  95% CI: [{pred['lower_95']:.2f}, {pred['upper_95']:.2f}]")
+                if 'z_score' in pred:
+                    print(f"  Observed: {pred['observed']:.2f}")
+                    print(f"  Z-score: {pred['z_score']:.2f}")
+    
+    print("\n" + "="*70)
 
 
 def interactive_mode(predictor):
-    """Interactive input mode"""
+    """Interactive prediction mode"""
     print("\n" + "="*70)
     print("🎯 Interactive Prediction Mode")
     print("="*70)
-    print("\nCovariate Input Instructions:")
-    print("  • Laser power: 1.0-4.5 (recommended 2.5-4.0)")
-    print("  • Gender:      1=male, 2=female")
-    print("  • Age:         recommended 18-25 years (training range 16-50)")
-    print("  • Height:      150-190 cm")
-    print("\nCommands:")
-    print("  • Enter 'q' to quit")
-    print("  • Enter 'b' to enter batch prediction mode")
-    print("  • Enter 'z' to enter prediction mode with observations (calculate Z-scores)")
-    print()
+    print("\nCommands: 'q' = quit, 'info' = feature info")
+    print("Or press Enter to start a new prediction")
     
     while True:
         try:
-            print("-"*70)
-            power_input = input("Laser power (q=quit, b=batch, z=Z-score mode): ").strip()
+            print("\n" + "-"*70)
+            user_input = input("\nPress Enter to predict (or type command): ").strip()
             
-            if power_input.lower() == 'q':
-                print("\n👋 Goodbye!")
+            if user_input.lower() == 'q':
+                print("Goodbye!")
                 break
             
-            if power_input.lower() == 'b':
-                print("\nSwitching to batch prediction mode...")
-                input_file = input("Input file path: ").strip()
-                output_file = input("Output file path (default: predictions.csv): ").strip()
-                if not output_file:
-                    output_file = 'predictions.csv'
-                batch_mode(predictor, input_file, output_file)
-                print("\nReturning to interactive mode")
+            if user_input.lower() == 'info':
+                print("\n📋 Available Features:")
+                info_df = predictor.get_feature_info()
+                print(info_df.to_string(index=False))
                 continue
             
-            if power_input.lower() == 'z':
-                print("\nSwitching to prediction mode with observations...")
-                z_score_mode(predictor)
-                print("\nReturning to interactive mode")
-                continue
+            # Try to parse as "laserpower gender age height" on one line
+            if user_input:
+                parts = user_input.split()
+                if len(parts) == 4:
+                    try:
+                        laserpower = float(parts[0])
+                        gender = int(float(parts[1]))
+                        age = float(parts[2])
+                        height = float(parts[3])
+                    except ValueError:
+                        print(f"\n❌ Cannot parse '{user_input}' as 4 parameters")
+                        print("   Format: laserpower gender age height (e.g., 3.5 1 25 170)")
+                        print("   Or press Enter and input each parameter separately")
+                        continue
+                else:
+                    print(f"\n❌ Expected 4 parameters, got {len(parts)}")
+                    print("   Format: laserpower gender age height (e.g., 3.5 1 25 170)")
+                    print("   Or press Enter and input each parameter separately")
+                    continue
+            else:
+                # Interactive step-by-step input
+                print("\nPlease enter the following parameters:")
+                lp_input = input("  Laser power (1.0-4.5): ").strip()
+                if not lp_input:
+                    print("  Cancelled.")
+                    continue
+                laserpower = float(lp_input)
+                gender = int(input("  Gender (1=male, 2=female): "))
+                age = float(input("  Age (years): "))
+                height = float(input("  Height (cm): "))
             
-            # Get input
-            laserpower = float(power_input)
-            gender = int(input("Gender (1=male, 2=female): "))
-            age = float(input("Age: "))
-            height = float(input("Height (cm): "))
+            # Ask if there are observations
+            has_obs = input("\nDo you have observed values? (y/n): ").strip().lower() == 'y'
             
-            # Predict
-            results = predictor.predict(laserpower, gender, age, height)
+            if has_obs:
+                observations = {}
+                print("\nEnter observed values (press Enter to skip):")
+                for feature in predictor.feature_names:
+                    obs_input = input(f"  {feature}: ").strip()
+                    if obs_input:
+                        try:
+                            observations[feature] = float(obs_input)
+                        except ValueError:
+                            print(f"    Invalid value, skipping {feature}")
+                
+                results = predictor.predict_with_observations(
+                    laserpower, gender, age, height, observations
+                )
+            else:
+                results = predictor.predict(laserpower, gender, age, height)
+            
+            # Print results
             print_results(results, laserpower, gender, age, height)
+            
+            # Explain Z-scores if observations were provided
+            if has_obs:
+                print("\nZ-score Interpretation:")
+                print("  |Z| < 1.96: Within 95% confidence interval (normal)")
+                print("  |Z| > 1.96: Outside 95% confidence interval (abnormal)")
+                print("  |Z| > 2.58: Outside 99% confidence interval (highly abnormal)")
             
         except ValueError as e:
             print(f"\n❌ Input error: {e}")
+            print("Please try again with valid numbers.")
         except KeyboardInterrupt:
-            print("\n\n👋 Goodbye!")
+            print("\n\nInterrupted, goodbye!")
+            break
+        except EOFError:
+            print("\n\nEOF detected, goodbye!")
             break
         except Exception as e:
             print(f"\n❌ Error: {e}")
-            import traceback
-            traceback.print_exc()
-
-
-def z_score_mode(predictor):
-    """Prediction mode with observations (calculate Z-scores)"""
-    print("\n" + "="*70)
-    print("📈 Z-score Calculation Mode")
-    print("="*70)
-    print("\nIn this mode, you can enter observed values to calculate Z-scores")
-    print("Z-score represents how many standard deviations the observed value deviates from predicted mean")
-    print()
-    
-    try:
-        # Get covariates
-        laserpower = float(input("Laser power: "))
-        gender = int(input("Gender (1=male, 2=female): "))
-        age = float(input("Age: "))
-        height = float(input("Height (cm): "))
-        
-        # Get observed values
-        print("\nPlease enter observed values (leave blank to skip that feature):")
-        observations = {}
-        for feature in predictor.feature_names:
-            obs_input = input(f"  {feature}: ").strip()
-            if obs_input:
-                try:
-                    observations[feature] = float(obs_input)
-                except ValueError:
-                    print(f"    ⚠️  Invalid input, skipping {feature}")
-        
-        # Predict and calculate Z-scores
-        results = predictor.predict_with_observations(
-            laserpower, gender, age, height, observations
-        )
-        
-        # Display results
-        print_results(results, laserpower, gender, age, height)
-        
-        # Explain Z-scores
-        print("\nZ-score Interpretation:")
-        print("  |Z| < 1.96: Within 95% confidence interval (normal)")
-        print("  |Z| > 1.96: Outside 95% confidence interval (abnormal)")
-        print("  |Z| > 2.58: Outside 99% confidence interval (highly abnormal)")
-        
-    except ValueError as e:
-        print(f"\n❌ Input error: {e}")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
+            print("Please try again.")
 
 
 def batch_mode(predictor, input_file, output_file):
@@ -704,6 +795,8 @@ def batch_mode(predictor, input_file, output_file):
     
     all_results = []
     warnings_count = 0
+    error_count = 0
+    error_samples = []
     
     for idx, row in df.iterrows():
         # Check input validity
@@ -714,6 +807,20 @@ def batch_mode(predictor, input_file, output_file):
         if warnings_list:
             warnings_count += 1
         
+        # Skip if severity is 'error' (invalid input)
+        if severity == 'error':
+            error_count += 1
+            error_samples.append({
+                'index': idx,
+                'laserpower': row['laserpower'],
+                'gender': row['gender'],
+                'age': row['age'],
+                'height': row['height'],
+                'error': 'Invalid input parameters'
+            })
+            print(f"⚠️  Skipping sample {idx} due to invalid input")
+            continue
+        
         # Prepare observations (if available)
         observations = {}
         if has_observations:
@@ -721,17 +828,30 @@ def batch_mode(predictor, input_file, output_file):
                 if feature in df.columns and not pd.isna(row[feature]):
                     observations[feature] = row[feature]
         
-        # Predict
-        if observations:
-            results = predictor.predict_with_observations(
-                row['laserpower'], row['gender'], row['age'], row['height'],
-                observations
-            )
-        else:
-            results = predictor.predict(
-                row['laserpower'], row['gender'], row['age'], row['height'],
-                show_warnings=False
-            )
+        # Predict (with error handling)
+        try:
+            if observations:
+                results = predictor.predict_with_observations(
+                    row['laserpower'], row['gender'], row['age'], row['height'],
+                    observations, show_warnings=False
+                )
+            else:
+                results = predictor.predict(
+                    row['laserpower'], row['gender'], row['age'], row['height'],
+                    show_warnings=False
+                )
+        except Exception as e:
+            error_count += 1
+            error_samples.append({
+                'index': idx,
+                'laserpower': row['laserpower'],
+                'gender': row['gender'],
+                'age': row['age'],
+                'height': row['height'],
+                'error': str(e)
+            })
+            print(f"❌ Error predicting sample {idx}: {e}")
+            continue
         
         if results:
             # Build output row
@@ -765,16 +885,42 @@ def batch_mode(predictor, input_file, output_file):
             print(f"  Processed {idx + 1}/{len(df)} samples...")
     
     # Save results
-    results_df = pd.DataFrame(all_results)
-    results_df.to_csv(output_file, index=False)
+    if all_results:
+        results_df = pd.DataFrame(all_results)
+        results_df.to_csv(output_file, index=False)
     
-    print(f"\n✅ Prediction complete!")
-    print(f"  Results saved to: {output_file}")
-    print(f"  Total samples: {len(results_df)}")
-    print(f"  Samples with warnings: {warnings_count}")
+    # Summary
+    print(f"\n" + "="*70)
+    print("✅ Batch Prediction Complete!")
+    print("="*70)
+    print(f"  Input samples: {len(df)}")
+    print(f"  Successful predictions: {len(all_results)}")
+    print(f"  Failed/skipped samples: {error_count}")
+    if warnings_count > 0:
+        print(f"  Samples with warnings: {warnings_count}")
+    
+    if all_results:
+        print(f"\n✓ Results saved to: {output_file}")
+    
+    # Report error samples if any
+    if error_samples:
+        print(f"\n⚠️  Failed/Skipped Samples ({len(error_samples)}):")
+        for err in error_samples[:10]:  # Show first 10
+            print(f"  - Index {err['index']}: age={err['age']}, error={err['error']}")
+        if len(error_samples) > 10:
+            print(f"  ... and {len(error_samples) - 10} more (check input file)")
+        
+        # Save error log
+        error_log_file = output_file.replace('.csv', '_errors.csv')
+        error_df = pd.DataFrame(error_samples)
+        error_df.to_csv(error_log_file, index=False)
+        print(f"\n✓ Error log saved to: {error_log_file}")
+    
+    print("="*70)
     
     # Statistics for abnormal Z-scores (if Z-scores were calculated)
-    if has_observations:
+    if all_results and has_observations:
+        results_df = pd.DataFrame(all_results)
         z_cols = [col for col in results_df.columns if col.endswith('_z_score')]
         if z_cols:
             print(f"\nZ-score Statistics:")
@@ -784,6 +930,239 @@ def batch_mode(predictor, input_file, output_file):
                 if len(z_values) > 0:
                     n_abnormal = (z_values.abs() > 1.96).sum()
                     print(f"  {feature}: {n_abnormal}/{len(z_values)} samples abnormal (|Z| > 1.96)")
+            print("="*70)
+
+
+def csv_batch_mode(predictor, input_file, output_file):
+    """
+    CSV batch prediction with NaN handling.
+    
+    Input CSV format:
+        Required column: laserpower
+        Optional columns: gender, age, height
+        - age/height NaN → imputed with training set mean
+        - gender NaN → weighted average of male/female predictions
+    
+    Output CSV format:
+        Input columns + predicted mean, std, 95% CI for all features
+    """
+    print("\n" + "="*70)
+    print("📁 CSV Batch Prediction Mode")
+    print("="*70)
+    
+    # Read input
+    try:
+        df = pd.read_csv(input_file)
+    except Exception as e:
+        print(f"\n❌ Failed to read file: {e}")
+        return
+    
+    # Check laserpower column (required)
+    if 'laserpower' not in df.columns:
+        print("❌ Missing required column: 'laserpower'")
+        print(f"   Found columns: {df.columns.tolist()}")
+        return
+    
+    n_samples = len(df)
+    print(f"\n✓ Loaded {n_samples} samples from: {input_file}")
+    
+    # Get training means for imputation
+    training_means = predictor.get_training_means()
+    gender_ratio = predictor.get_gender_ratio()
+    
+    # --- Handle missing columns and NaN values ---
+    
+    # If column doesn't exist at all, create it with NaN
+    for col in ['gender', 'age', 'height']:
+        if col not in df.columns:
+            df[col] = np.nan
+            print(f"  ℹ️  Column '{col}' not found, will use default values")
+    
+    # Track imputation statistics
+    n_age_imputed = 0
+    n_height_imputed = 0
+    n_gender_missing = 0
+    
+    # Impute age NaN
+    age_nan_mask = df['age'].isna()
+    if age_nan_mask.any():
+        n_age_imputed = age_nan_mask.sum()
+        df.loc[age_nan_mask, 'age'] = training_means['age']
+        print(f"  ℹ️  Age: {n_age_imputed} missing values imputed with training mean ({training_means['age']:.1f} years)")
+    
+    # Impute height NaN
+    height_nan_mask = df['height'].isna()
+    if height_nan_mask.any():
+        n_height_imputed = height_nan_mask.sum()
+        df.loc[height_nan_mask, 'height'] = training_means['height']
+        print(f"  ℹ️  Height: {n_height_imputed} missing values imputed with training mean ({training_means['height']:.1f} cm)")
+    
+    # Gender NaN: mark for special handling (don't impute, predict averaged)
+    gender_nan_mask = df['gender'].isna()
+    n_gender_missing = gender_nan_mask.sum()
+    if n_gender_missing > 0:
+        print(f"  ℹ️  Gender: {n_gender_missing} missing values → will use population-weighted average")
+        print(f"       (male weight: {gender_ratio['male']:.2%}, female weight: {gender_ratio['female']:.2%})")
+    
+    # Check for observation columns (for Z-score calculation)
+    obs_features = [f for f in predictor.feature_names if f in df.columns]
+    has_observations = len(obs_features) > 0
+    if has_observations:
+        print(f"  ✓ Observation columns detected: {obs_features}")
+        print(f"    Will calculate Z-scores for these features")
+    
+    # Validate laserpower range
+    lp_min = df['laserpower'].min()
+    lp_max = df['laserpower'].max()
+    lp_nan = df['laserpower'].isna().sum()
+    if lp_nan > 0:
+        print(f"  ⚠️  Warning: {lp_nan} rows have missing laserpower, will be skipped")
+    print(f"  Laserpower range: [{lp_min:.2f}, {lp_max:.2f}]")
+    
+    print(f"\nStarting prediction for {n_samples} samples...\n")
+    
+    # --- Predict ---
+    all_results = []
+    error_count = 0
+    error_samples = []
+    
+    for idx, row in df.iterrows():
+        # Skip if laserpower is NaN
+        if pd.isna(row['laserpower']):
+            error_count += 1
+            error_samples.append({'index': idx, 'error': 'laserpower is NaN'})
+            continue
+        
+        laserpower = float(row['laserpower'])
+        age = float(row['age'])
+        height = float(row['height'])
+        gender_is_nan = pd.isna(row['gender'])
+        
+        try:
+            if gender_is_nan:
+                # Gender missing → weighted average of male/female
+                results = predictor.predict_gender_averaged(laserpower, age, height)
+                gender_display = 'averaged'
+            else:
+                gender = int(row['gender'])
+                if gender not in [1, 2]:
+                    error_count += 1
+                    error_samples.append({'index': idx, 'error': f'Invalid gender: {gender}'})
+                    continue
+                results = predictor.predict(laserpower, gender, age, height, show_warnings=False)
+                gender_display = gender
+            
+            # Calculate Z-scores if observations available
+            if has_observations and results:
+                for feature in obs_features:
+                    if feature in results and results[feature] is not None:
+                        obs_val = row[feature]
+                        if not pd.isna(obs_val):
+                            pred = results[feature]
+                            pred['observed'] = float(obs_val)
+                            pred['z_score'] = (float(obs_val) - pred['mean']) / pred['std']
+        
+        except Exception as e:
+            error_count += 1
+            error_samples.append({'index': idx, 'error': str(e)})
+            continue
+        
+        if results:
+            # Build output row
+            flat_result = {
+                'index': idx,
+                'laserpower': laserpower,
+                'gender': row['gender'] if not gender_is_nan else np.nan,
+                'gender_method': 'averaged' if gender_is_nan else 'direct',
+                'age': age,
+                'age_imputed': bool(age_nan_mask.iloc[idx]) if idx < len(age_nan_mask) else False,
+                'height': height,
+                'height_imputed': bool(height_nan_mask.iloc[idx]) if idx < len(height_nan_mask) else False,
+            }
+            
+            # Add predictions for each feature
+            for feature in predictor.feature_names:
+                pred = results.get(feature)
+                if pred is not None:
+                    flat_result[f'{feature}_pred_mean'] = pred['mean']
+                    flat_result[f'{feature}_pred_std'] = pred['std']
+                    flat_result[f'{feature}_pred_lower95'] = pred['lower_95']
+                    flat_result[f'{feature}_pred_upper95'] = pred['upper_95']
+                    if 'observed' in pred:
+                        flat_result[f'{feature}_observed'] = pred['observed']
+                    if 'z_score' in pred:
+                        flat_result[f'{feature}_z_score'] = pred['z_score']
+                else:
+                    flat_result[f'{feature}_pred_mean'] = np.nan
+                    flat_result[f'{feature}_pred_std'] = np.nan
+                    flat_result[f'{feature}_pred_lower95'] = np.nan
+                    flat_result[f'{feature}_pred_upper95'] = np.nan
+            
+            all_results.append(flat_result)
+        
+        # Progress
+        if (idx + 1) % 100 == 0 or (idx + 1) == n_samples:
+            print(f"  Processed {idx + 1}/{n_samples} samples...")
+    
+    # Save results
+    if all_results:
+        results_df = pd.DataFrame(all_results)
+        results_df.to_csv(output_file, index=False, float_format='%.4f')
+    
+    # Summary
+    print(f"\n" + "="*70)
+    print("✅ CSV Batch Prediction Complete!")
+    print("="*70)
+    print(f"  Input samples:           {n_samples}")
+    print(f"  Successful predictions:  {len(all_results)}")
+    print(f"  Failed/skipped:          {error_count}")
+    if n_age_imputed > 0:
+        print(f"  Age imputed:             {n_age_imputed} (→ {training_means['age']:.1f})")
+    if n_height_imputed > 0:
+        print(f"  Height imputed:          {n_height_imputed} (→ {training_means['height']:.1f})")
+    if n_gender_missing > 0:
+        print(f"  Gender averaged:         {n_gender_missing}")
+    
+    if all_results:
+        print(f"\n✓ Results saved to: {output_file}")
+        
+        # Show preview
+        results_df = pd.DataFrame(all_results)
+        pred_cols = [c for c in results_df.columns if c.endswith('_pred_mean')]
+        if pred_cols:
+            print(f"\nPrediction summary (mean values):")
+            for col in pred_cols:
+                feature = col.replace('_pred_mean', '')
+                unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "a.u."
+                vals = results_df[col].dropna()
+                print(f"  {feature:15s}: mean={vals.mean():.2f}, "
+                      f"range=[{vals.min():.2f}, {vals.max():.2f}] {unit}")
+        
+        # Z-score statistics if available
+        z_cols = [c for c in results_df.columns if c.endswith('_z_score')]
+        if z_cols:
+            print(f"\nZ-score statistics:")
+            for col in z_cols:
+                feature = col.replace('_z_score', '')
+                z_vals = results_df[col].dropna()
+                if len(z_vals) > 0:
+                    n_abnormal = (z_vals.abs() > 1.96).sum()
+                    print(f"  {feature:15s}: mean={z_vals.mean():.2f}, std={z_vals.std():.2f}, "
+                          f"|Z|>1.96: {n_abnormal}/{len(z_vals)}")
+    
+    # Error log
+    if error_samples:
+        print(f"\n⚠️  Failed samples ({len(error_samples)}):")
+        for err in error_samples[:5]:
+            print(f"  - Index {err['index']}: {err['error']}")
+        if len(error_samples) > 5:
+            print(f"  ... and {len(error_samples) - 5} more")
+        
+        error_log = output_file.replace('.csv', '_errors.csv')
+        pd.DataFrame(error_samples).to_csv(error_log, index=False)
+        print(f"  Error log: {error_log}")
+    
+    print("="*70)
 
 
 def quick_mode(predictor, laserpower, gender, age, height):
@@ -795,28 +1174,45 @@ def quick_mode(predictor, laserpower, gender, age, height):
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
-        description="HBR Interactive Predictor - Feature-wise Training Version",
+        description="HBR Interactive Predictor - 10-Feature Model Version",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Usage Examples:
 
 1. Interactive mode (default):
-   python predictor_by_feature.py
+   python normative_model_LEP_v4.py
 
 2. Quick prediction:
-   python predictor_by_feature.py -q 3.5 1 21 170
+   python normative_model_LEP_v4.py -q 3.5 1 21 170
 
-3. Batch prediction:
-   python predictor_by_feature.py -b input.csv -o output.csv
+3. CSV batch prediction (with NaN handling):
+   python normative_model_LEP_v4.py -c input.csv -o output.csv
 
-4. Specify parameter file:
-   python predictor_by_feature.py -p extracted_model_params.json
+4. Legacy batch prediction:
+   python normative_model_LEP_v4.py -b input.csv -o output.csv
+
+5. Debug mode (show intermediate values):
+   python normative_model_LEP_v4.py -d -q 3.5 1 65 170
+
+6. Specify parameter file:
+   python normative_model_LEP_v4.py -p extracted_model_params.json
+
+CSV Input Format:
+  Required: laserpower
+  Optional: gender (1=male, 2=female), age, height
+  - age/height NaN → imputed with training set mean
+  - gender NaN → population-weighted average prediction
 
 Covariate Instructions:
   • laserpower: Laser power (1.0-4.5, recommended 2.5-4.0)
   • gender: Gender (1=male, 2=female)
   • age: Age (recommended 18-25 years)
   • height: Height (150-190 cm)
+
+Features (10 total):
+  • Amplitudes: N1_amp, N2_amp, P2_amp (μV)
+  • Latencies: N1_latency, N2_latency, P2_latency (ms)
+  • Magnitudes: LEP_mag, alpha_mag, beta_mag, gamma_mag (a.u.)
         """
     )
     
@@ -824,7 +1220,8 @@ Covariate Instructions:
     parser.add_argument('-q', '--quick', nargs=4, 
                        metavar=('POWER', 'GENDER', 'AGE', 'HEIGHT'),
                        help='Quick prediction mode')
-    parser.add_argument('-b', '--batch', metavar='INPUT', help='Batch prediction input file')
+    parser.add_argument('-b', '--batch', metavar='INPUT', help='Legacy batch prediction input file')
+    parser.add_argument('-c', '--csv', metavar='INPUT', help='CSV batch prediction with NaN handling')
     parser.add_argument('-o', '--output', metavar='OUTPUT', help='Batch prediction output file')
     parser.add_argument('-d', '--debug', action='store_true', help='Show debug information')
     
@@ -832,16 +1229,20 @@ Covariate Instructions:
     
     # Print welcome message
     print("\n" + "="*70)
-    print("🚀 HBR Interactive Predictor - Feature-wise Training Version")
+    print("🚀 HBR Interactive Predictor - 10-Feature Model Version (v4)")
     print("="*70)
     
     # Load predictor
     try:
         predictor = HBRPredictorByFeature(args.params)
+        if args.debug:
+            predictor.debug = True
+            print("\n🔍 Debug mode enabled - will show intermediate values")
         print(f"\n✓ Using parameter file: {predictor.params_file}")
         print(f"✓ Successfully loaded {len(predictor.feature_names)} feature models:")
         for i, feature in enumerate(predictor.feature_names, 1):
-            print(f"   {i}. {feature}")
+            unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "a.u."
+            print(f"   {i}. {feature} ({unit})")
     except Exception as e:
         print(f"\n❌ Loading failed: {e}")
         import traceback
@@ -865,6 +1266,10 @@ Covariate Instructions:
             print("❌ Batch mode requires specifying output file (-o)")
             sys.exit(1)
         batch_mode(predictor, args.batch, args.output)
+    
+    elif args.csv:
+        output = args.output if args.output else args.csv.replace('.csv', '_predictions.csv')
+        csv_batch_mode(predictor, args.csv, output)
     
     else:
         interactive_mode(predictor)
