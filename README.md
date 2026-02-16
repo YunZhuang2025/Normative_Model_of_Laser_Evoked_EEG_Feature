@@ -5,7 +5,7 @@ A command-line tool for predicting laser-evoked brain responses (LEP features) u
 ## Overview
 
 This tool predicts seven brain electrical features from laser-evoked potentials based on covariates (laser power, gender, age, height):
-- **ERP components**: N1, N2, P2 amplitudes
+- **ERP components**: N1, N2, P2 amplitudes and latencies
 - **Time-frequency features**: ERP, alpha, beta, gamma magnitudes
 
 Each feature uses an independent normative model with B-spline basis functions and can calculate Z-scores for observed values.
@@ -30,9 +30,6 @@ scipy
 ```bash
 python normative_model_LEP_EN.py
 ```
-or for Chinese version
-```bash
-python normative_model_LEP_CN.py
 ```
 Select from:
 - Prediction mode: Get normative predictions with confidence intervals
@@ -80,4 +77,4 @@ Zhuang Y., Zhang L.B., Wang X.Q., Geng X.Y., & Hu L., (in preparation) From Norm
 
 Yun Zhuang  
 Version: 1.0  
-Date: 2025-11-27
+Date: 2026-02-16
