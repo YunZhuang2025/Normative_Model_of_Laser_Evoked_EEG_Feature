@@ -4,7 +4,7 @@ Normative model for laser-evoked brain electrical features based on PCNtoolkit
 
 Author: Yun Zhuang
 Date: 2025-01-16
-Version: v4.0.0
+Version: v5.0.0
 
 If you use this tool in published research, please cite:
 Zhuang Y., Zhang L.B., Wang X.Q., Geng X.Y., & Hu L., (in preparation) 
@@ -27,14 +27,73 @@ warnings.filterwarnings('ignore')
 
 def softplus(x, params=(0.0, 3.0)):
     """
-    Softplus mapping function
-    sigma = scale * log(1 + exp((x - shift) / scale))
+    Softplus mapping function.
+
+    2-param form (shift, scale):
+        out = scale * log(1 + exp((x - shift) / scale))
+
+    3-param form (shift, scale, offset):
+        out = offset + scale * log(1 + exp((x - shift) / scale))
+        The offset ensures the output is always >= offset (used for delta
+        in SHASHb to keep it bounded away from 0).
     """
-    shift, scale = params
+    if len(params) == 3:
+        shift, scale, offset = params
+    else:
+        shift, scale = params
+        offset = 0.0
     x_scaled = (x - shift) / scale
-    # Clip to prevent overflow
     x_clipped = np.clip(x_scaled, -20, 20)
-    return scale * np.log1p(np.exp(x_clipped))
+    return offset + scale * np.log1p(np.exp(x_clipped))
+
+
+def apply_mapping(x, mapping_config):
+    """
+    Apply a named mapping function to scalar or array x.
+
+    Supported types:
+        'identity' - no transformation
+        'softplus'  - 2-param or 3-param softplus (see softplus())
+    """
+    mtype = mapping_config.get('type', 'identity')
+    params = mapping_config.get('params', [0.0, 1.0])
+    if mtype == 'identity':
+        return x
+    elif mtype == 'softplus':
+        return softplus(x, params)
+    else:
+        warnings.warn(f"Unknown mapping type '{mtype}', applying identity.")
+        return x
+
+
+def shash_quantile(mu, sigma, epsilon, delta, p):
+    """
+    Quantile function of the SHASHb distribution.
+
+    For Y ~ SHASHb(mu, sigma, epsilon, delta):
+        Q(p) = mu + sigma * sinh((arcsinh(z_p) + epsilon) / delta)
+    where z_p = standard normal quantile at p.
+
+    This is the correct formula for computing prediction intervals under
+    the Sinh-Arcsinh (Jones & Pewsey 2009) likelihood used in SHASHb.
+    """
+    from scipy.stats import norm
+    z_p = norm.ppf(p)
+    return mu + sigma * np.sinh((np.arcsinh(z_p) + epsilon) / delta)
+
+
+def shash_zscore(y, mu, sigma, epsilon, delta):
+    """
+    Compute the normative Z-score for the SHASHb distribution.
+
+    If Y ~ SHASHb(mu, sigma, epsilon, delta), then:
+        Z = delta * arcsinh((Y - mu) / sigma) - epsilon  ~  Normal(0, 1)
+
+    This Z-score represents the signed distance of an observed value from
+    the normative distribution on a standard-normal scale, correctly
+    accounting for skewness (epsilon) and tail weight (delta).
+    """
+    return delta * np.arcsinh((y - mu) / sigma) - epsilon
 
 
 def create_bspline_basis(x, knots, degree=3):
@@ -328,137 +387,160 @@ class HBRPredictorByFeature:
     
     def predict_single_feature(self, feature_name, laserpower, gender, age, height):
         """
-        Predict a single feature
-        
+        Predict a single feature.
+
+        Supports two likelihood families:
+          - 'SHASHb' (Sinh-Arcsinh): amp and mag features
+                Parameters: mu, sigma, epsilon (skewness), delta (tail weight)
+                epsilon and delta are global scalar posteriors (no B-spline regression).
+                95% CI uses exact SHASH quantile formula.
+                Z-score = delta * arcsinh((y - mu) / sigma) - epsilon
+          - 'normal' (Gaussian): latency features
+                Parameters: mu, sigma
+                95% CI = mu +/- 1.96 * sigma
+                Z-score = (y - mu) / sigma
+
         Returns:
-            dict with keys: 'mean', 'std', 'lower_95', 'upper_95'
+            dict with keys:
+                'mean'      : predicted mean (original scale)
+                'std'       : sigma parameter (original scale)
+                'lower_95'  : 2.5th percentile (original scale)
+                'upper_95'  : 97.5th percentile (original scale)
+            SHASHb only (additional keys):
+                'epsilon'   : skewness parameter (after mapping)
+                'delta'     : tail-weight parameter (after mapping, always > 0)
         """
         if feature_name not in self.model_params:
             raise ValueError(f"Feature {feature_name} not found in model parameters")
-        
+
         params = self.model_params[feature_name]
-        
-        # 1. Prepare input covariates
+        likelihood_cat = params.get('likelihood_category', 'normal')
+
+        # ------------------------------------------------------------------
+        # 1. Prepare and standardize input covariates
+        # ------------------------------------------------------------------
         X_raw = np.array([laserpower, gender, age, height])
-        
-        # 2. Standardize input
         inscaler = self.inscalers[feature_name]
         X_std = (X_raw - inscaler['mean']) / inscaler['std']
-        
+
         if self.debug:
-            print(f"\n  [DEBUG {feature_name}]")
-            print(f"    X_raw:  {X_raw}")
+            print(f"\n  [DEBUG {feature_name}] [{likelihood_cat}]")
+            print(f"    X_raw:         {X_raw}")
             print(f"    inscaler mean: {inscaler['mean']}")
             print(f"    inscaler std:  {inscaler['std']}")
-            print(f"    X_std:  {X_std}")
-        
-        # 3. Create B-spline basis for mu
-        mu_basis_config = params['mu_basis']
-        basis_col = mu_basis_config['basis_column'][0]
-        
-        # Get knots and create basis
-        knots_dict = mu_basis_config['knots']
-        knots = knots_dict[str(basis_col)] if isinstance(knots_dict, dict) else knots_dict
-        
-        mu_basis = create_bspline_basis(
-            X_std[basis_col], 
-            knots, 
-            degree=mu_basis_config['degree']
-        )
-        
-        # 4. Construct expanded covariate vector
-        n_basis = len(mu_basis)
-        X_expanded = []
-        
-        for i, x_val in enumerate(X_std):
-            if i == basis_col:
-                X_expanded.extend(mu_basis)
-            else:
-                X_expanded.append(x_val)
-        
-        X_expanded = np.array(X_expanded)
-        
-        # 5. Check if we need to add dataset batch effect placeholder
-        # New models with dataset batch effect need an extra dimension
-        expected_dim = len(params['covariate_dims'])
-        current_dim = len(X_expanded)
-        
-        if current_dim < expected_dim:
-            # Add placeholder for dataset batch effect (use 0 as default)
-            n_missing = expected_dim - current_dim
-            X_expanded = np.append(X_expanded, [0] * n_missing)
-        
-        # 5. Calculate mu (predicted mean)
-        slope_mu = np.array(params['posterior']['slope_mu']['mean'])
-        intercept_mu = float(params['posterior']['mu_intercept_mu']['mean'])
-        
-        mu_std = np.dot(X_expanded, slope_mu) + intercept_mu
-        
+            print(f"    X_std:         {X_std}")
+
+        # ------------------------------------------------------------------
+        # 2. Helper: build B-spline expanded covariate vector
+        # ------------------------------------------------------------------
+        def _expand_covariates(basis_config):
+            """
+            Replace the designated covariate column with its B-spline basis,
+            keep all other columns as scalar values.
+            Returns the expanded vector, padded to expected_dim if needed.
+            """
+            col = basis_config['basis_column'][0]
+            knots_raw = basis_config['knots']
+            knots = knots_raw[str(col)] if isinstance(knots_raw, dict) else knots_raw
+            basis = create_bspline_basis(X_std[col], knots, degree=basis_config['degree'])
+
+            expanded = []
+            for i, x_val in enumerate(X_std):
+                if i == col:
+                    expanded.extend(basis)
+                else:
+                    expanded.append(x_val)
+            expanded = np.array(expanded)
+
+            expected_dim = len(params['covariate_dims'])
+            if len(expanded) < expected_dim:
+                expanded = np.append(expanded, [0] * (expected_dim - len(expanded)))
+            return expanded
+
+        # ------------------------------------------------------------------
+        # 3. Compute mu (both likelihoods)
+        # ------------------------------------------------------------------
+        X_mu = _expand_covariates(params['mu_basis'])
+        slope_mu     = np.array(params['posterior']['slope_mu']['mean'])
+        intercept_mu = float(params['posterior']['intercept_mu']['mean'])  # key fixed from v4
+        mu_linear    = np.dot(X_mu, slope_mu) + intercept_mu
+        mu_std_val   = apply_mapping(mu_linear, params.get('mu_mapping', {'type': 'identity'}))
+
         if self.debug:
-            print(f"    X_expanded dim: {len(X_expanded)} (expected: {expected_dim})")
-            print(f"    mu_std (standardized): {mu_std:.4f}")
-        
-        # 6. Create B-spline basis for sigma
-        sigma_basis_config = params['sigma_basis']
-        sigma_basis_col = sigma_basis_config['basis_column'][0]
-        
-        sigma_knots_dict = sigma_basis_config['knots']
-        sigma_knots = sigma_knots_dict[str(sigma_basis_col)] if isinstance(sigma_knots_dict, dict) else sigma_knots_dict
-        
-        sigma_basis = create_bspline_basis(
-            X_std[sigma_basis_col],
-            sigma_knots,
-            degree=sigma_basis_config['degree']
-        )
-        
-        # 7. Construct expanded covariate vector for sigma
-        n_sigma_basis = len(sigma_basis)
-        X_sigma_expanded = []
-        
-        for i, x_val in enumerate(X_std):
-            if i == sigma_basis_col:
-                X_sigma_expanded.extend(sigma_basis)
-            else:
-                X_sigma_expanded.append(x_val)
-        
-        X_sigma_expanded = np.array(X_sigma_expanded)
-        
-        # Check if we need to add dataset batch effect placeholder for sigma
-        if len(X_sigma_expanded) < expected_dim:
-            n_missing = expected_dim - len(X_sigma_expanded)
-            X_sigma_expanded = np.append(X_sigma_expanded, [0] * n_missing)
-        
-        # 8. Calculate sigma (predicted std)
-        slope_sigma = np.array(params['posterior']['slope_sigma']['mean'])
+            print(f"    X_mu dim:      {len(X_mu)} (expected: {len(params['covariate_dims'])})")
+            print(f"    mu_std:        {mu_std_val:.4f}")
+
+        # ------------------------------------------------------------------
+        # 4. Compute sigma (both likelihoods)
+        # ------------------------------------------------------------------
+        X_sigma       = _expand_covariates(params['sigma_basis'])
+        slope_sigma     = np.array(params['posterior']['slope_sigma']['mean'])
         intercept_sigma = float(params['posterior']['intercept_sigma']['mean'])
-        
-        sigma_linear = np.dot(X_sigma_expanded, slope_sigma) + intercept_sigma
-        
-        # Apply softplus mapping
-        sigma_mapping_params = params['sigma_mapping']['params']
-        sigma_std = softplus(sigma_linear, sigma_mapping_params)
-        
-        # 9. Inverse standardize
-        outscaler = params['outscaler']
-        mu_original = mu_std * outscaler['std'] + outscaler['mean']
-        sigma_original = sigma_std * outscaler['std']
-        
+        sigma_linear    = np.dot(X_sigma, slope_sigma) + intercept_sigma
+        sigma_std_val   = apply_mapping(sigma_linear, params.get('sigma_mapping',
+                                        {'type': 'softplus', 'params': [0.0, 3.0]}))
+
         if self.debug:
-            print(f"    sigma_std (after softplus): {sigma_std:.4f}")
-            print(f"    outscaler: mean={outscaler['mean']:.4f}, std={outscaler['std']:.4f}")
-            print(f"    mu_original: {mu_original:.4f}")
-            print(f"    sigma_original: {sigma_original:.4f}")
-        
-        # 10. Calculate 95% confidence interval
-        lower_95 = mu_original - 1.96 * sigma_original
-        upper_95 = mu_original + 1.96 * sigma_original
-        
-        return {
-            'mean': float(mu_original),
-            'std': float(sigma_original),
-            'lower_95': float(lower_95),
-            'upper_95': float(upper_95)
-        }
+            print(f"    sigma_std:     {sigma_std_val:.4f}")
+
+        # ------------------------------------------------------------------
+        # 5. Inverse standardize to original scale
+        # ------------------------------------------------------------------
+        outscaler     = params['outscaler']
+        mu_original   = mu_std_val * outscaler['std'] + outscaler['mean']
+        sigma_original = sigma_std_val * outscaler['std']
+
+        if self.debug:
+            print(f"    outscaler:     mean={outscaler['mean']:.4f}, std={outscaler['std']:.4f}")
+            print(f"    mu_original:   {mu_original:.4f}")
+            print(f"    sigma_original:{sigma_original:.4f}")
+
+        # ------------------------------------------------------------------
+        # 6a. SHASHb: compute epsilon/delta, SHASH-exact CI
+        # ------------------------------------------------------------------
+        if likelihood_cat == 'SHASHb':
+            # epsilon (skewness): scalar posterior, identity mapping
+            epsilon_raw = float(params['posterior']['epsilon']['mean'])
+            epsilon = apply_mapping(epsilon_raw,
+                                    params.get('epsilon_mapping', {'type': 'identity'}))
+
+            # delta (tail weight): scalar posterior, 3-param softplus keeps delta > offset
+            delta_raw = float(params['posterior']['delta']['mean'])
+            delta = apply_mapping(delta_raw,
+                                  params.get('delta_mapping',
+                                             {'type': 'softplus', 'params': [0.0, 3.0]}))
+
+            if self.debug:
+                print(f"    epsilon (raw/mapped): {epsilon_raw:.4f} / {epsilon:.4f}")
+                print(f"    delta   (raw/mapped): {delta_raw:.4f} / {delta:.4f}")
+
+            # Exact 95% PI via SHASH quantile function:
+            #   Q(p) = mu + sigma * sinh((arcsinh(z_p) + epsilon) / delta)
+            lower_95 = float(shash_quantile(mu_original, sigma_original, epsilon, delta, 0.025))
+            upper_95 = float(shash_quantile(mu_original, sigma_original, epsilon, delta, 0.975))
+
+            return {
+                'mean':     float(mu_original),
+                'std':      float(sigma_original),   # sigma scale parameter
+                'lower_95': lower_95,
+                'upper_95': upper_95,
+                'epsilon':  float(epsilon),
+                'delta':    float(delta),
+            }
+
+        # ------------------------------------------------------------------
+        # 6b. Normal: symmetric Gaussian CI
+        # ------------------------------------------------------------------
+        else:
+            lower_95 = mu_original - 1.96 * sigma_original
+            upper_95 = mu_original + 1.96 * sigma_original
+
+            return {
+                'mean':     float(mu_original),
+                'std':      float(sigma_original),
+                'lower_95': float(lower_95),
+                'upper_95': float(upper_95),
+            }
     
     def predict(self, laserpower, gender, age, height, show_warnings=True):
         """
@@ -505,9 +587,22 @@ class HBRPredictorByFeature:
         for feature, pred in predictions.items():
             if pred is not None and feature in observations:
                 observed = observations[feature]
-                z_score = (observed - pred['mean']) / pred['std']
+                params = self.model_params.get(feature, {})
+                likelihood_cat = params.get('likelihood_category', 'normal')
+
+                if likelihood_cat == 'SHASHb':
+                    # SHASHb Z-score: delta * arcsinh((y - mu) / sigma) - epsilon
+                    # Equivalent to the standard-normal quantile of F(y) under SHASH.
+                    epsilon = pred.get('epsilon', 0.0)
+                    delta   = pred.get('delta', 1.0)
+                    z_score = float(shash_zscore(observed, pred['mean'], pred['std'],
+                                                 epsilon, delta))
+                else:
+                    # Normal Z-score
+                    z_score = (observed - pred['mean']) / pred['std']
+
                 pred['observed'] = observed
-                pred['z_score'] = z_score
+                pred['z_score']  = z_score
         
         return predictions
     
@@ -647,7 +742,7 @@ def print_results(results, laserpower, gender, age, height):
     # Print magnitudes
     if magnitude_features:
         print("\n" + "-"*70)
-        print("Magnitudes (μV^2/Hz):")
+        print("Magnitudes (a.u.):")
         print("-"*70)
         for feature in magnitude_features:
             pred = results[feature]
@@ -1133,7 +1228,7 @@ def csv_batch_mode(predictor, input_file, output_file):
             print(f"\nPrediction summary (mean values):")
             for col in pred_cols:
                 feature = col.replace('_pred_mean', '')
-                unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "μV^2/Hz"
+                unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "a.u."
                 vals = results_df[col].dropna()
                 print(f"  {feature:15s}: mean={vals.mean():.2f}, "
                       f"range=[{vals.min():.2f}, {vals.max():.2f}] {unit}")
@@ -1212,7 +1307,7 @@ Covariate Instructions:
 Features (10 total):
   • Amplitudes: N1_amp, N2_amp, P2_amp (μV)
   • Latencies: N1_latency, N2_latency, P2_latency (ms)
-  • Magnitudes: LEP_mag, alpha_mag, beta_mag, gamma_mag (μV^2/Hz)
+  • Magnitudes: LEP_mag, alpha_mag, beta_mag, gamma_mag (a.u.)
         """
     )
     
@@ -1229,7 +1324,7 @@ Features (10 total):
     
     # Print welcome message
     print("\n" + "="*70)
-    print("🚀 HBR Interactive Predictor - 10-Feature Model Version (v4)")
+    print("🚀 HBR Interactive Predictor - 10-Feature Model Version (v5)")
     print("="*70)
     
     # Load predictor
@@ -1241,7 +1336,7 @@ Features (10 total):
         print(f"\n✓ Using parameter file: {predictor.params_file}")
         print(f"✓ Successfully loaded {len(predictor.feature_names)} feature models:")
         for i, feature in enumerate(predictor.feature_names, 1):
-            unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "μV^2/Hz"
+            unit = "μV" if "_amp" in feature else "ms" if "_latency" in feature else "a.u."
             print(f"   {i}. {feature} ({unit})")
     except Exception as e:
         print(f"\n❌ Loading failed: {e}")
